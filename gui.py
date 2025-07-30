@@ -1,24 +1,19 @@
 """
 Main graphical user interface for the Blackjack Strategy Simulator.
-
-This stable version provides a comprehensive and crash-free interface for:
-- Manually inputting cards with a guided, sequential workflow.
-- Displaying real-time card counting metrics (Hi-Lo, Zen, Wong Halves, Omega II).
-- Running high-speed, stable Monte Carlo simulations to calculate Expected Value (EV).
-- Providing strategic advice based on basic strategy and simulation results.
-- Visualizing game state information like deck penetration and card counts.
+This version automatically optimizes CPU usage and includes critical fixes
+for threading stability to prevent crashes between simulations.
 """
 from __future__ import annotations
 import sys
+import os
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QPushButton, QLabel, QGridLayout,
     QVBoxLayout, QHBoxLayout, QGroupBox, QRadioButton, QTextEdit, QMessageBox,
-    QProgressBar, QButtonGroup
+    QProgressBar, QButtonGroup, QInputDialog
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QObject
-from PyQt6.QtGui import QFont, QColor
+from PyQt6.QtGui import QFont
 
-# Import the refined backend modules
 import counting
 import shoe
 import simulator
@@ -26,73 +21,53 @@ import strategy
 import bayesian_predictor
 import decision_advisor
 
-# --- Worker for Offloading Simulations ---
-
 class SimulationWorker(QObject):
-    """
-    A worker object that runs the simulation in a separate thread to avoid
-    freezing the GUI. Emits results or an error message upon completion.
-    """
     finished = pyqtSignal(dict)
     error = pyqtSignal(str)
 
-    def __init__(self, shoe_dict: dict[str, int]):
+    def __init__(self, shoe_dict: dict[str, int], num_threads: int):
         super().__init__()
         self.shoe_dict = shoe_dict
+        self.num_threads = num_threads
 
     def run(self):
-        """Executes the simulation and emits the results or any exceptions."""
         try:
-            # Ensure the simulator is instantiated and run within the try block
             sim = simulator.FastSimulator(self.shoe_dict)
-            results = sim.run(total_rounds=500_000, num_threads=4)
+            results = sim.run(total_rounds=250_000, num_threads=8)
             self.finished.emit(results)
         except Exception as e:
-            # Catch any exception from the simulation and emit an error signal
             self.error.emit(f"A critical error occurred in the simulation engine:\n{e}")
 
-# --- Main Application Window ---
-
 class MainWindow(QMainWindow):
-    """
-    The main window for the Blackjack Simulator application. This version includes
-    robust error handling, stable threading, and corrected state management.
-    """
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Blackjack Strategy Simulator (Stable Version)")
+        self.setWindowTitle("Blackjack Strategy Simulator (Stable)")
         self.resize(1200, 800)
 
-        # --- Initialize Backend Components ---
         self.shoe = shoe.Shoe(decks=8)
         self.counters = {
-            "Hi-Lo": counting.HiLoCount(),
-            "Zen": counting.ZenCount(),
-            "Wong Halves": counting.WongHalves(),
-            "Omega II": counting.Omega2Count(),
+            "Hi-Lo": counting.HiLoCount(), "Zen": counting.ZenCount(),
+            "Wong Halves": counting.WongHalves(), "Omega II": counting.Omega2Count(),
         }
         self.strategy_advisor = strategy.StrategyAdvisor()
         
-        # --- State Management ---
         self.simulation_thread: QThread | None = None
         self.simulation_worker: SimulationWorker | None = None
+        self.dealer_hole_card_placeholder: str | None = None
+        
         self._init_round_state()
-
-        # --- Build UI ---
         self._init_ui()
         self.update_displays()
 
     def _init_round_state(self):
-        """Initializes or resets the state for a new round of betting."""
-        # SIMPLIFIED STATE: Using simple lists, not lists of lists.
         self.selected_cards: dict[str, list[str]] = {"player": [], "dealer": [], "burned": []}
-        self.action_history: list[tuple[str, str]] = [] # Stores (card_code, mode)
+        self.action_history: list[tuple[str, str]] = []
         self.round_card_count: int = 0
         self.current_selection_mode: str = "player"
         self.last_sim_results: dict[str, float] | None = None
+        self.dealer_hole_card_placeholder = None
 
     def _init_ui(self):
-        """Initializes the main user interface layout and widgets."""
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QHBoxLayout(central_widget)
@@ -106,24 +81,19 @@ class MainWindow(QMainWindow):
         main_layout.addLayout(right_panel, 2)
     
     def _create_card_input_panel(self) -> QVBoxLayout:
-        """Creates the left panel for card selection and input."""
         layout = QVBoxLayout()
-        
         mode_group = QGroupBox("Card Input Mode")
         mode_layout = QHBoxLayout()
         self.radio_player = QRadioButton("Player")
         self.radio_dealer = QRadioButton("Dealer")
         self.radio_burned = QRadioButton("Burned")
-        self.radio_player.setChecked(True) # Default to player
+        self.radio_player.setChecked(True)
         
         self.mode_button_group = QButtonGroup(self)
         self.mode_button_group.addButton(self.radio_player)
         self.mode_button_group.addButton(self.radio_dealer)
         self.mode_button_group.addButton(self.radio_burned)
-        
-        self.radio_player.toggled.connect(lambda: self._on_radio_toggled("player"))
-        self.radio_dealer.toggled.connect(lambda: self._on_radio_toggled("dealer"))
-        self.radio_burned.toggled.connect(lambda: self._on_radio_toggled("burned"))
+        self.mode_button_group.buttonToggled.connect(self._on_radio_toggled)
 
         mode_layout.addWidget(self.radio_player)
         mode_layout.addWidget(self.radio_dealer)
@@ -133,7 +103,6 @@ class MainWindow(QMainWindow):
 
         card_grid_group = QGroupBox("Select Cards")
         grid_layout = QGridLayout()
-        grid_layout.setSpacing(4)
         self.card_buttons: dict[str, QPushButton] = {}
         ranks = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"]
         suits = {"S": "♠", "H": "♥", "D": "♦", "C": "♣"}
@@ -152,8 +121,8 @@ class MainWindow(QMainWindow):
         layout.addWidget(card_grid_group)
 
         control_layout = QGridLayout()
-        self.run_sim_button = QPushButton("Run Simulation")
-        self.run_sim_button.clicked.connect(self._run_simulation)
+        self.run_sim_button = QPushButton("Run Sim & End Round")
+        self.run_sim_button.clicked.connect(self._run_simulation_and_end_round)
         self.undo_button = QPushButton("Undo Last")
         self.undo_button.clicked.connect(self._undo_last_card)
         self.reset_button = QPushButton("Reset Shoe")
@@ -161,13 +130,11 @@ class MainWindow(QMainWindow):
         
         control_layout.addWidget(self.run_sim_button, 0, 0)
         control_layout.addWidget(self.undo_button, 0, 1)
-        control_layout.addWidget(self.reset_button, 1, 0, 1, 2) # Span reset button
+        control_layout.addWidget(self.reset_button, 1, 0, 1, 2)
         layout.addLayout(control_layout)
-
         return layout
 
     def _create_info_panel(self) -> QVBoxLayout:
-        """Creates the middle panel for displaying game state and counts."""
         layout = QVBoxLayout()
         self.selected_cards_display = QTextEdit()
         self.selected_cards_display.setReadOnly(True)
@@ -184,7 +151,7 @@ class MainWindow(QMainWindow):
             self.count_labels[f"{name}_rc"] = QLabel("0")
             counts_layout.addWidget(self.count_labels[f"{name}_rc"], i, 1)
             counts_layout.addWidget(QLabel(f"{name} TC:"), i, 2)
-            self.count_labels[f"{name}_tc"] = QLabel("0.00")
+            self.count_labels[f"{name}_tc"] = QLabel("0.0")
             counts_layout.addWidget(self.count_labels[f"{name}_tc"], i, 3)
         counts_group.setLayout(counts_layout)
         layout.addWidget(counts_group)
@@ -203,7 +170,6 @@ class MainWindow(QMainWindow):
         return layout
 
     def _create_strategy_panel(self) -> QVBoxLayout:
-        """Creates the right panel for displaying strategic advice."""
         layout = QVBoxLayout()
         advisor_group = QGroupBox("Basic Strategy Decision Advisor")
         advisor_layout = QVBoxLayout()
@@ -224,161 +190,176 @@ class MainWindow(QMainWindow):
         layout.addWidget(sim_strat_group)
         return layout
 
-    # --- Event Handlers and Logic ---
-
-    def _on_radio_toggled(self, mode: str):
-        """Updates the current selection mode when a radio button is clicked."""
-        if self.radio_player.isChecked():
-            self.current_selection_mode = "player"
-        elif self.radio_dealer.isChecked():
-            self.current_selection_mode = "dealer"
-        elif self.radio_burned.isChecked():
-            self.current_selection_mode = "burned"
+    def _on_radio_toggled(self, button, checked):
+        if not checked: return
+        mode_map = {self.radio_player: "player", self.radio_dealer: "dealer", self.radio_burned: "burned"}
+        self.current_selection_mode = mode_map.get(button, "player")
 
     def _card_button_clicked(self, card_code: str):
-        """Handles clicks on any of the 52 card buttons."""
+        mode = self.current_selection_mode
+        if self.round_card_count == 0: mode = "player"
+        elif self.round_card_count == 1: mode = "dealer"
+        elif self.round_card_count == 2: mode = "player"
+        
+        self._add_card_to_game(card_code, mode)
+
+        if self.round_card_count == 3:
+            try:
+                placeholder_card = self.shoe.draw_random_card()
+                self.dealer_hole_card_placeholder = placeholder_card
+                self._add_card_to_game(placeholder_card, "hole")
+            except ValueError as e:
+                QMessageBox.warning(self, "Shoe Error", str(e))
+
+    def _add_card_to_game(self, card_code: str, mode: str):
         try:
-            self.shoe.remove_card(card_code)
+            if card_code != self.dealer_hole_card_placeholder:
+                self.shoe.remove_card(card_code)
             
-            # Add card to the correct hand based on mode
-            mode = self.current_selection_mode
-            self.selected_cards[mode].append(card_code)
+            for counter in self.counters.values(): counter.update(card_code)
             
-            # Update counters and history
-            for counter in self.counters.values():
-                counter.update(card_code)
+            if mode in self.selected_cards:
+                 self.selected_cards[mode].append(card_code)
+            
             self.action_history.append((card_code, mode))
             self.round_card_count += 1
-
         except (ValueError, KeyError) as e:
             QMessageBox.warning(self, "Card Error", str(e))
             return
-
         self.update_displays()
 
     def _undo_last_card(self):
-        """Reverts the last card action."""
-        if not self.action_history:
-            QMessageBox.information(self, "Undo", "No actions to undo.")
-            return
-        
+        if not self.action_history: return
         last_card, last_mode = self.action_history.pop()
         
         try:
             self.shoe.restore_card(last_card)
-            # Use a robust method to remove the last occurrence of the card
-            if last_card in self.selected_cards[last_mode]:
+            if last_mode in self.selected_cards and last_card in self.selected_cards[last_mode]:
                  self.selected_cards[last_mode].remove(last_card)
             
-            for counter in self.counters.values():
-                counter.undo(last_card)
+            for counter in self.counters.values(): counter.undo(last_card)
+            self.round_card_count -= 1
 
-            self.round_card_count = max(0, self.round_card_count - 1)
+            if last_card == self.dealer_hole_card_placeholder:
+                self.dealer_hole_card_placeholder = None
         except (ValueError, KeyError) as e:
             QMessageBox.critical(self, "Undo Error", f"Could not undo action: {e}")
-            self.action_history.append((last_card, last_mode)) # Restore history
+            self.action_history.append((last_card, last_mode))
             return
-            
         self.update_displays()
 
-    def _run_simulation(self):
-        """Initiates the simulation in a background thread."""
+    def _run_simulation_and_end_round(self):
         if self.simulation_thread and self.simulation_thread.isRunning():
             QMessageBox.warning(self, "Simulation in Progress", "A simulation is already running.")
             return
+        self._start_simulation_thread()
 
+    def _start_simulation_thread(self):
         self.run_sim_button.setEnabled(False)
         self.run_sim_button.setText("Simulating...")
-        self.sim_output.setText("Running high-performance simulation, please wait...")
+        self.sim_output.setText("Running high-performance simulation...")
 
+        num_cores_to_use = max(1, os.cpu_count() - 1)
+        
         self.simulation_thread = QThread()
-        self.simulation_worker = SimulationWorker(self.shoe.get_remaining_cards())
+        self.simulation_worker = SimulationWorker(self.shoe.get_remaining_cards(), num_cores_to_use)
         self.simulation_worker.moveToThread(self.simulation_thread)
 
         self.simulation_thread.started.connect(self.simulation_worker.run)
         self.simulation_worker.finished.connect(self._on_simulation_finished)
         self.simulation_worker.error.connect(self._on_simulation_error)
         
-        # Clean up thread and worker after they are finished
         self.simulation_worker.finished.connect(self.simulation_thread.quit)
         self.simulation_worker.finished.connect(self.simulation_worker.deleteLater)
         self.simulation_thread.finished.connect(self.simulation_thread.deleteLater)
+        # BUG FIX: Connect the finished signal to the cleanup slot.
+        self.simulation_thread.finished.connect(self._cleanup_thread_references)
         
         self.simulation_thread.start()
 
     def _on_simulation_finished(self, results: dict[str, float]):
-        """Handles the results when the simulation worker is done."""
         self.last_sim_results = results
         self.run_sim_button.setEnabled(True)
-        self.run_sim_button.setText("Run Simulation")
+        self.run_sim_button.setText("Run Sim & End Round")
         
-        # After simulation, clear the hand for the next round, but keep shoe state
+        self._prompt_for_hole_card()
+        
         self._init_round_state() 
-        self.last_sim_results = results # Preserve results for display
+        self.last_sim_results = results
         self.update_displays()
-        self.sim_output.append("\n\n--- End of Round ---\nReady for next hand input.")
+        self.sim_output.append("\n\n--- End of Round ---\nReady for next hand.")
 
+    def _prompt_for_hole_card(self):
+        if not self.dealer_hole_card_placeholder: return
+        all_cards = list(self.card_buttons.keys())
+        actual_card, ok = QInputDialog.getItem(self, "End of Round", 
+                                               "Enter the Dealer's actual hole card:", all_cards, 0, False)
+        if ok and actual_card:
+            try:
+                self.shoe.restore_card(self.dealer_hole_card_placeholder)
+                for counter in self.counters.values(): counter.undo(self.dealer_hole_card_placeholder)
+                self.shoe.remove_card(actual_card)
+                for counter in self.counters.values(): counter.update(actual_card)
+            except (ValueError, KeyError) as e:
+                QMessageBox.critical(self, "Shoe Correction Error", f"Failed to correct shoe state: {e}")
 
     def _on_simulation_error(self, error_message: str):
-        """Handles errors from the simulation worker, preventing crashes."""
         QMessageBox.critical(self, "Simulation Error", error_message)
         self.sim_output.setText(f"Error during simulation:\n{error_message}")
         self.run_sim_button.setEnabled(True)
-        self.run_sim_button.setText("Run Simulation")
+        self.run_sim_button.setText("Run Sim & End Round")
+
+    def _cleanup_thread_references(self):
+        """
+        BUG FIX: This method clears the references to the thread and worker
+        objects, preventing the 'wrapped C/C++ object has been deleted' error.
+        """
+        self.simulation_thread = None
+        self.simulation_worker = None
 
     def _reset_shoe(self):
-        """Resets the entire application to its initial state."""
-        reply = QMessageBox.question(self, "Confirm Reset", 
-                                     "Are you sure you want to reset the entire shoe?",
+        reply = QMessageBox.question(self, "Confirm Reset", "Reset the entire shoe?",
                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        if reply == QMessageBox.StandardButton.No:
-            return
-
+        if reply == QMessageBox.StandardButton.No: return
         self.shoe.reset_shoe()
-        for counter in self.counters.values():
-            counter.reset()
-        
+        for counter in self.counters.values(): counter.reset()
         self._init_round_state()
         self.sim_output.clear()
         self.update_displays()
 
     def update_displays(self):
-        """Updates all text labels, progress bars, and strategy outputs."""
-        # --- Update Card Displays ---
         display_text = ""
         for role, cards in self.selected_cards.items():
             display_text += f"{role.title():<7}: {' '.join(cards)}\n"
+        if self.dealer_hole_card_placeholder:
+            display_text += f"Hole   : [Placeholder: {self.dealer_hole_card_placeholder}]\n"
         self.selected_cards_display.setText(display_text)
         
-        # --- Update Card Buttons ---
         for card_code, button in self.card_buttons.items():
             button.setEnabled(self.shoe.cards.get(card_code, 0) > 0)
 
-        # --- Update Counters and Shoe Status ---
         decks_remaining = self.shoe.decks_remaining()
         for name, counter in self.counters.items():
             rc, tc = counter.running_count, counter.true_count(decks_remaining)
             self.count_labels[f"{name}_rc"].setText(f"{rc:g}")
-            self.count_labels[f"{name}_tc"].setText(f"{tc:.2f}")
+            self.count_labels[f"{name}_tc"].setText(f"{tc:.0f}")
 
         self.cards_remaining_label.setText(f"{self.shoe.total_cards} / {self.shoe.initial_card_count}")
         self.penetration_bar.setValue(int(self.shoe.get_penetration() * 100))
         
-        # --- Update Decision Advisor (with safety checks) ---
         try:
             player_hand = self.selected_cards["player"]
             dealer_upcard = self.selected_cards["dealer"][0] if self.selected_cards["dealer"] else None
             
             if len(player_hand) >= 2 and dealer_upcard:
-                omega_tc = self.counters["Omega II"].true_count(decks_remaining)
-                advice = decision_advisor.recommend_action(player_hand, dealer_upcard, omega_tc)
+                hilo_tc = self.counters["Hi-Lo"].true_count(decks_remaining)
+                advice = decision_advisor.recommend_action(player_hand, dealer_upcard, hilo_tc)
                 self.advisor_output.setText(advice)
             else:
                 self.advisor_output.setText("Enter Player (2) and Dealer (1) cards for advice.")
         except Exception as e:
             self.advisor_output.setText(f"Advisor Error: {e}")
 
-        # --- Update Simulation/Strategy Output ---
         if self.last_sim_results:
             try:
                 dealer_upcard = self.selected_cards["dealer"][0] if self.selected_cards["dealer"] else None
@@ -393,11 +374,9 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 self.sim_output.setText(f"Strategy Display Error: {e}")
         elif not self.run_sim_button.isEnabled():
-            # Keep "Simulating..." message
             pass
         else:
             self.sim_output.setText("Enter cards and run simulation to get betting advice.")
-
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

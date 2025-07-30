@@ -72,7 +72,7 @@ class Shoe:
 
     def draw_random_card(self) -> str:
         """
-        Draws a single random card from the available cards in the shoe.
+        Draws a single random card from the available cards in the shoe and removes it.
         
         Returns:
             str: The card code of the drawn card.
@@ -83,14 +83,14 @@ class Shoe:
         if self.total_cards == 0:
             raise ValueError("Cannot draw from an empty shoe.")
         
-        # Create a list of cards weighted by their count
-        available_cards = [card for card, count in self.cards.items() for _ in range(count)]
+        # Create a list of all available cards to choose from
+        available_cards = [card for card, count in self.cards.items() if count > 0 for _ in range(count)]
         if not available_cards:
-             raise ValueError("Shoe state error: total_cards > 0 but no cards found.")
+             raise ValueError("Shoe state error: total_cards > 0 but no available cards were found.")
              
-        card_to_draw = random.choice(available_cards)
-        self.remove_card(card_to_draw) # This also decrements the counts
-        return card_to_draw
+        drawn_card = random.choice(available_cards)
+        self.remove_card(drawn_card)
+        return drawn_card
 
     def decks_remaining(self) -> float:
         """
@@ -99,9 +99,9 @@ class Shoe:
         Returns:
             float: The approximate number of decks left, used for true count calculation.
         """
-        if self.initial_card_count == 0:
-            return 0.0
-        return self.total_cards / 52.0
+
+        return self.total_cards / 52.0 if self.initial_card_count > 0 else 0.0
+
 
     def get_penetration(self) -> float:
         """
@@ -111,9 +111,9 @@ class Shoe:
             float: A value between 0.0 and 1.0 representing the fraction of
                    cards that have been dealt from the shoe.
         """
-        if self.initial_card_count == 0:
-            return 0.0
-        return (self.initial_card_count - self.total_cards) / self.initial_card_count
+
+        return (self.initial_card_count - self.total_cards) / self.initial_card_count if self.initial_card_count > 0 else 0.0
+
         
     def get_remaining_cards(self) -> dict[str, int]:
         """

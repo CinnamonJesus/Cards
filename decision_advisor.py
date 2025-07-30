@@ -1,118 +1,142 @@
-# decision_advisor.py
 """
-Provides player decision advice based on the Omega II counting system,
-index plays, and Bayesian analysis of the remaining shoe composition.
+Provides player decision advice based on S17 basic strategy, common index plays,
+and shoe composition analysis.
 """
 from __future__ import annotations
 from typing import TYPE_CHECKING
-import bayesian_predictor
 
 if TYPE_CHECKING:
     from shoe import Shoe
 
-OMEGA_II_CONFIG = {
-    "insurance_threshold": 2.0,
+STRATEGY_CONFIG = {
+    "insurance_threshold": 3.0,
     "index_plays": {
-        "16v10": 0, "15v10": 2, "14v10": 4, "13v2": -1, "12v3": 1, "12v4": -2,
-        "11vA": -1, "10vA": 3, "10vT": 3, "9v2": 1, "9v7": 3,
+        "16-vs-10": {"action": "Stand", "threshold": 0},
+        "15-vs-10": {"action": "Stand", "threshold": 4},
+        "13-vs-2":  {"action": "Stand", "threshold": -1},
+        "12-vs-2":  {"action": "Stand", "threshold": 3},
+        "12-vs-3":  {"action": "Stand", "threshold": 2},
+        "12-vs-4":  {"action": "Stand", "threshold": -1, "condition": "below"},
+        "10-vs-A":  {"action": "Double", "threshold": 4},
+        "9-vs-2":   {"action": "Double", "threshold": 1},
+        "9-vs-7":   {"action": "Double", "threshold": 3},
     }
 }
 
 class Hand:
     """Represents a player's or dealer's hand of cards."""
     def __init__(self, cards: list[str]):
+        if not isinstance(cards, list):
+            raise TypeError("Hand must be initialized with a list of card strings.")
         self.cards = cards
         self.value, self.is_soft = self._calculate_value()
 
     def _calculate_value(self) -> tuple[int, bool]:
-        total, ace_count = 0, 0
+        """Calculates the blackjack value of the hand, handling aces correctly."""
+        total = 0
+        ace_count = 0
         for card in self.cards:
             rank = card[:-1] if card.startswith("10") else card[0]
             if rank == 'A':
                 ace_count += 1
                 total += 11
-            elif rank in ('K', 'Q', 'J'):
-                total += 10
-            elif rank == '10':
+            elif rank in ('K', 'Q', 'J', '10'):
                 total += 10
             else:
                 total += int(rank)
         
-        is_soft = ace_count > 0
+        soft = ace_count > 0
         while total > 21 and ace_count > 0:
             total -= 10
             ace_count -= 1
-        return total, is_soft
+        
+        if total > 21 and soft:
+             soft = False
+        elif ace_count == 0:
+             soft = False
+
+        return total, soft
 
     @property
     def is_pair(self) -> bool:
-        if len(self.cards) != 2: return False
-        r1 = self.cards[0][:-1] if self.cards[0].startswith("10") else self.cards[0][0]
-        r2 = self.cards[1][:-1] if self.cards[1].startswith("10") else self.cards[1][0]
-        return r1 == r2
+        """Checks if the hand is a pair (first two cards)."""
+        if len(self.cards) != 2:
+            return False
+        rank1 = self.cards[0][:-1] if self.cards[0].startswith("10") else self.cards[0][0]
+        rank2 = self.cards[1][:-1] if self.cards[1].startswith("10") else self.cards[1][0]
+        return rank1 == rank2
 
 def recommend_action(
     player_hand_cards: list[str],
-    dealer_upcard_str: str,
+    dealer_upcard: str,
     true_count: float,
-    shoe: 'Shoe'
+    config: dict | None = None
 ) -> str:
-    if not player_hand_cards or not dealer_upcard_str:
-        return "Awaiting full input"
+    """
+    Recommends a blackjack action based on S17 basic strategy and index plays.
+    """
+    if not player_hand_cards or not dealer_upcard:
+        return "Awaiting Player and Dealer cards."
 
-    cfg = OMEGA_II_CONFIG
+    cfg = config or STRATEGY_CONFIG
     player_hand = Hand(player_hand_cards)
-    dealer_hand = Hand([dealer_upcard_str])
     
-    # Bayesian Prediction
-    next_cards_info = ""
-    try:
-        next_probs = bayesian_predictor.next_card_probabilities(shoe.get_remaining_cards(), top_n=3)
-        if next_probs:
-            card_preds = [f"{c} ({p:.1%})" for c, p in next_probs]
-            next_cards_info = f"<br><i>Next Card Prediction: {', '.join(card_preds)}</i>"
-    except Exception:
-        pass
+    dealer_rank_str = dealer_upcard[0]
+    if dealer_upcard.startswith("10"): dealer_rank_str = "10"
+    if dealer_rank_str in ('J', 'Q', 'K'): dealer_rank_str = "10"
+    
+    dealer_up_value = Hand([dealer_upcard]).value
 
-    # Basic Strategy and Index Plays
-    action = _get_basic_strategy_action(player_hand, dealer_hand, cfg, true_count)
+    if player_hand.value == 21 and len(player_hand.cards) == 2:
+        return "Blackjack!"
 
-    return f'<b>{action}</b>{next_cards_info}'
+    if dealer_rank_str == 'A' and len(player_hand.cards) == 2:
+        return "Take Insurance" if true_count >= cfg["insurance_threshold"] else "Decline Insurance"
 
-def _get_basic_strategy_action(player_hand: Hand, dealer_hand: Hand, cfg: dict, tc: float) -> str:
-    # Insurance
-    if len(player_hand.cards) == 2 and dealer_hand.cards[0][0] == 'A':
-        return "Take Insurance" if tc >= cfg["insurance_threshold"] else "Decline Insurance"
-
-    # Splitting
+    # --- Splitting Logic ---
     if player_hand.is_pair:
-        pair_rank = player_hand.cards[0][0]
-        if pair_rank in ('A', '8'): return "Split"
-        # Additional split logic could be added here
+        pair_rank_str = player_hand.cards[0][0]
+        if pair_rank_str == 'A' or pair_rank_str == '8': return "Split"
+        if pair_rank_str == '9' and dealer_up_value not in [7, 10, 11]: return "Split"
+        if pair_rank_str == '7' and dealer_up_value <= 7: return "Split"
+        if pair_rank_str == '6' and dealer_up_value <= 6: return "Split"
+        # Only split 4s vs 5, 6 when Double After Split is allowed. Assume it is for advice.
+        if pair_rank_str == '4' and dealer_up_value in [5, 6]: return "Split"
+        if pair_rank_str in ['2', '3'] and dealer_up_value <= 7: return "Split"
+        # Note: Do not split 10s or 5s in basic strategy.
 
-    # Soft Totals
+    # --- Index Play Lookup (after splitting decisions) ---
+    index_key = f"{player_hand.value}-vs-{dealer_rank_str}"
+    if index_key in cfg["index_plays"]:
+        play = cfg["index_plays"][index_key]
+        threshold = play["threshold"]
+        condition = play.get("condition", "above")
+        
+        if (condition == "above" and true_count >= threshold) or \
+           (condition == "below" and true_count < threshold):
+            return f"{play['action']} (Index Play)"
+
+    # --- Soft Totals ---
     if player_hand.is_soft:
         if player_hand.value >= 19: return "Stand"
-        if player_hand.value == 18 and dealer_hand.value >= 9: return "Hit"
-        if player_hand.value == 18 and dealer_hand.value in [2, 7, 8]: return "Stand"
-        if len(player_hand.cards) == 2: # Double Down
-             if player_hand.value == 18 and dealer_hand.value in [3,4,5,6]: return "Double"
-             if player_hand.value == 17 and dealer_hand.value in [3,4,5,6]: return "Double"
+        if player_hand.value == 18:
+            if dealer_up_value >= 9: return "Hit"
+            if dealer_up_value in [2, 7, 8]: return "Stand"
+            return "Double" if len(player_hand.cards) == 2 else "Stand"
+        if len(player_hand.cards) == 2:
+            if player_hand.value == 17 and dealer_up_value in [3,4,5,6]: return "Double"
+            if player_hand.value in [15,16] and dealer_up_value in [4,5,6]: return "Double"
+            if player_hand.value in [13,14] and dealer_up_value in [5,6]: return "Double"
         return "Hit"
 
-    # Hard Totals (with Index Plays)
-    key = f"{player_hand.value}v{dealer_hand.value}"
-    if dealer_hand.value == 10: key = f"{player_hand.value}vT" # Consolidate 10-value cards
-    if key in cfg['index_plays'] and tc >= cfg['index_plays'][key]:
-        return "Stand (Index)"
-    
-    if len(player_hand.cards) == 2: # Double Down
-        if player_hand.value == 11: return "Double"
-        if player_hand.value == 10 and dealer_hand.value <= 9: return "Double"
-        if player_hand.value == 9 and dealer_hand.value in [3,4,5,6]: return "Double"
-
+    # --- Hard Totals ---
     if player_hand.value >= 17: return "Stand"
-    if player_hand.value >= 13 and dealer_hand.value <= 6: return "Stand"
-    if player_hand.value == 12 and dealer_hand.value in [4,5,6]: return "Stand"
+    if player_hand.value >= 13 and dealer_up_value <= 6: return "Stand"
+    if player_hand.value == 12 and dealer_up_value in [4,5,6]: return "Stand"
     
+    if len(player_hand.cards) == 2:
+        if player_hand.value == 11: return "Double"
+        if player_hand.value == 10 and dealer_up_value <= 9: return "Double"
+        if player_hand.value == 9 and dealer_up_value in [3,4,5,6]: return "Double"
+        
     return "Hit"

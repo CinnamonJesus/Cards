@@ -1,9 +1,9 @@
 """
 Performs Bayesian-style predictions about game outcomes through Monte Carlo simulation,
-such as predicting the dealer's final hand total and calculating immediate side bet EV.
+such as predicting the dealer's final hand total and immediate side bet EV.
 """
 from __future__ import annotations
-from collections import defaultdict
+from collections import defaultdict, Counter
 from random import choices
 import numpy as np
 from numba import njit, prange
@@ -34,6 +34,34 @@ def next_card_probabilities(shoe_cards: dict[str, int], top_n: int = 5) -> list[
     probs = {card: count / total_cards for card, count in shoe_cards.items()}
     sorted_cards = sorted(probs.items(), key=lambda item: item[1], reverse=True)
     return sorted_cards[:top_n]
+
+def next_rank_probabilities(shoe_cards: dict[str, int]) -> list[tuple[str, float]]:
+    """Calculates the probability distribution for the rank of the next card."""
+    total_cards = sum(shoe_cards.values())
+    if total_cards == 0:
+        return []
+    
+    rank_counts = Counter()
+    for card, count in shoe_cards.items():
+        rank = card[:-1] if card.startswith("10") else card[0]
+        rank_counts[rank] += count
+        
+    probs = {rank: count / total_cards for rank, count in rank_counts.items()}
+    return sorted(probs.items(), key=lambda item: item[1], reverse=True)
+
+def next_suit_probabilities(shoe_cards: dict[str, int]) -> list[tuple[str, float]]:
+    """Calculates the probability distribution for the suit of the next card."""
+    total_cards = sum(shoe_cards.values())
+    if total_cards == 0:
+        return []
+        
+    suit_counts = Counter()
+    for card, count in shoe_cards.items():
+        suit = card[-1]
+        suit_counts[suit] += count
+        
+    probs = {suit: count / total_cards for suit, count in suit_counts.items()}
+    return sorted(probs.items(), key=lambda item: item[1], reverse=True)
 
 def dealer_total_probabilities(
     dealer_upcard: str,
